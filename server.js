@@ -8,6 +8,7 @@ const path = require("path");
 const postRoutes = require("./routes/post");
 const profileRoutes = require("./routes/profile");
 const authRoutes = require("./routes/auth");
+const adminAuthRoutes = require("./routes/adminAuth"); // Add this line
 
 const app = express();
 
@@ -37,6 +38,7 @@ mongoose
 app.use("/api/posts", postRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/profile", profileRoutes);
+app.use("/api/admin", adminAuthRoutes);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 const PORT = 5000;

@@ -22,6 +22,10 @@ const postSchema = new mongoose.Schema({
     type: String,
     enum: ["Resolved", "In Progress", "Pending"],
     default: "Pending"
+  },
+  clusterAssignment: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "ClusterAssignment"
   }
 }, { timestamps: true });
 
