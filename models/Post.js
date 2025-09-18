@@ -17,6 +17,11 @@ const postSchema = new mongoose.Schema({
       type: [Number], // [longitude, latitude]
       required: true
     }
+  },
+  status: {
+    type: String,
+    enum: ["Resolved", "In Progress", "Pending"],
+    default: "Pending"
   }
 }, { timestamps: true });
 

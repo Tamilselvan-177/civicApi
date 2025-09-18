@@ -155,6 +155,72 @@ router.get("/my/posts", auth, async (req, res) => {
   }
 });
 
+//  auth, <>><<><><><><><><><><><><><><><><>
+// 📊 Get counts of posts by status and total reports
+router.get("/stats", async (req, res) => {
+  try {
+    const resolvedCount = await Post.countDocuments({ status: "Resolved" });
+    const pendingCount = await Post.countDocuments({ status: "Pending" });
+    const inProgressCount = await Post.countDocuments({ status: "In Progress" });
+    const totalReports = await Post.countDocuments();
+
+    res.json({
+      resolved: resolvedCount,
+      pending: pendingCount,
+      inProgress: inProgressCount,
+      totalReports
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+/// 📓📓📓📓
+// 🛡️ Admin: Get all posts with location and description (no auth)
+// routes/admin.js
+router.get("/admin/all", async (req, res) => {
+  try {
+    const posts = await Post.find({}, { location: 1, description: 1, status: 1, createdAt: 1 })
+      .populate("user", "username email")
+      .lean(); // faster, returns plain JS objects
+
+    res.json(posts); // 👈 send array directly, not wrapped { posts }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 🛡️ Admin: Get all posts (flattened for dashboard)
+router.get("/admin/posts", async (req, res) => {
+  try {
+    const posts = await Post.find()
+      .populate("user", "username email")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // flatten user object
+    const formattedPosts = posts.map((post) => ({
+      ...post,
+      userId: post.user?._id || null,
+      userName: post.user?.username || "Unknown",
+      userEmail: post.user?.email || "",
+    }));
+
+    res.json(formattedPosts);
+  } catch (err) {
+    console.error("❌ Error fetching admin posts:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+//// #### users
 
 // ✏️ Update a post (only owner, only within 5 minutes)
 router.put("/:id", auth, async (req, res) => {
@@ -276,10 +342,6 @@ router.post("/:id/comment", auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-
-
-
 
 
 

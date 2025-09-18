@@ -26,8 +26,10 @@ app.use(morgan("dev")); // logs to console
 app.use(morgan("combined", { stream: accessLogStream })); // logs to file
 
 // MongoDB connection
+
+//mongodb+srv://Tamil:<db_password>@cluster0.j3m9g.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
 mongoose
-  .connect("mongodb://127.0.0.1:27017/civic")
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch(err => console.log(err));
 
