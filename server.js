@@ -9,11 +9,12 @@ const postRoutes = require("./routes/post");
 const profileRoutes = require("./routes/profile");
 const authRoutes = require("./routes/auth");
 const adminAuthRoutes = require("./routes/adminAuth"); // Add this line
+const ivrRoutes = require('./routes/ivr');
 
 const app = express();
 
 app.use(express.json());
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 
 
 // ✅ Create a write stream (in append mode) for logs
@@ -25,6 +26,7 @@ const accessLogStream = fs.createWriteStream(
 // ✅ Morgan setup
 app.use(morgan("dev")); // logs to console
 app.use(morgan("combined", { stream: accessLogStream })); // logs to file
+app.use(express.urlencoded({ extended: true }));
 
 // MongoDB connection
 
@@ -39,6 +41,8 @@ app.use("/api/posts", postRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/api/admin", adminAuthRoutes);
+app.use('/api/ivr', ivrRoutes);
+
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 const PORT = 5000;
