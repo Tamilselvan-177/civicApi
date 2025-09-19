@@ -162,6 +162,9 @@ router.get("/stats", async (req, res) => {
     const resolvedCount = await Post.countDocuments({ status: "Resolved" });
     const pendingCount = await Post.countDocuments({ status: "Pending" });
     const inProgressCount = await Post.countDocuments({ status: "In Progress" });
+    console.log("Resolved Count:", resolvedCount);
+    console.log("Pending Count:", pendingCount);
+    console.log("InProgress Count:", inProgressCount);
     const totalReports = await Post.countDocuments();
 
     res.json({
