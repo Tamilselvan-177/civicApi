@@ -14,18 +14,22 @@
   "dependencies": {
     "@adminjs/express": "^6.1.1",
     "@adminjs/mongoose": "^4.1.0",
-    "adminjs": "^7.8.17",
+    "@faker-js/faker": "^9.9.0",
+    "adminjs": "^7.6.1",
     "bcryptjs": "^3.0.2",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
     "crypto": "^1.0.1",
     "dotenv": "^17.2.2",
+    "expo-server-sdk": "^4.0.0",
     "express": "^5.1.0",
     "express-session": "^1.18.2",
+    "faker": "^5.5.3",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
+    "natural": "^8.1.0",
     "nodemailer": "^7.0.6",
     "twilio": "^5.10.0"
   }

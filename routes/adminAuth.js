@@ -5,9 +5,67 @@ const User = require("../models/User");
 const Post = require("../models/Post");
 const ClusterAssignment = require("../models/ClusterAssignment");
 const roleAuth = require("../middleware/adminAuth");
-require("dotenv").config();
+const DeviceToken = require("../models/DeviceToken");
+const natural = require("natural");
 
 const router = express.Router();
+const { Expo } = require("expo-server-sdk");
+const expo = new Expo();
+require("dotenv").config();
+
+const priorityKeywords = {
+  high: ["fallen", "tree", "open", "manhole", "accident", "danger", "fire", "injury"],
+  medium: ["pothole", "malfunction", "leakage", "overflow", "streetlight", "traffic"],
+  low: ["graffiti", "dumping", "sidewalk", "minor"]
+};
+const tokenizer = new natural.WordTokenizer();
+
+// Function to get numeric priority
+function getPriorityScore(text) {
+  const tokens = tokenizer.tokenize((text || "").toLowerCase());
+  if (tokens.some(token => priorityKeywords.high.includes(token))) return 1; // High
+  if (tokens.some(token => priorityKeywords.medium.includes(token))) return 2; // Medium
+  return 3; // Low
+}
+// Fetch posts and rank
+async function getHighestPriorityPosts(limit = 10) {
+  const posts = await Post.find().lean();
+
+  posts.forEach(post => {
+    post.nlpPriority = getPriorityScore(post.description);
+  });
+
+  posts.sort((a, b) => a.nlpPriority - b.nlpPriority || new Date(a.createdAt) - new Date(b.createdAt));
+
+  return posts.slice(0, limit);
+}
+
+// Usage
+getHighestPriorityPosts(20).then(posts => console.log(posts));
+
+// helper function to send push
+async function sendPushNotification(tokens, title, body) {
+  let messages = [];
+  for (let pushToken of tokens) {
+    if (!Expo.isExpoPushToken(pushToken)) continue;
+    messages.push({
+      to: pushToken,
+      sound: "default",
+      title,
+      body,
+      data: { screen: "ClusterDetails", extra: { cluster: true } }
+    });
+  }
+
+  const chunks = expo.chunkPushNotifications(messages);
+  for (let chunk of chunks) {
+    try {
+      await expo.sendPushNotificationsAsync(chunk);
+    } catch (error) {
+      console.error("❌ Error sending push:", error);
+    }
+  }
+}
 
 /**
  * 🔑 Login route for all roles (admin, superadmin, department)
@@ -51,17 +109,23 @@ router.get("/me", roleAuth(["admin", "superadmin", "department"]), async (req, r
     res.status(500).json({ error: err.message });
   }
 });
-
 /**
  * 📝 Get deduplicated/clustered posts
  * Accessible by: admin, superadmin
+ * FIXED: No automatic status updates - only return clusters for review
  */
 router.get("/posts/deduplicate", roleAuth(["admin", "superadmin"]), async (req, res) => {
   try {
-    const posts = await Post.find({ status: "Pending" })
+    // Only get truly pending posts (not already processed)
+    const posts = await Post.find({ 
+      status: "Pending",
+      clusterAssignment: { $exists: false } // Exclude posts already in clusters
+    })
       .populate("user", "username email")
       .sort({ createdAt: -1 })
       .lean();
+
+    console.log(`📊 Found ${posts.length} pending posts for clustering`);
 
     // --- helpers ---
     const getDescriptionSimilarity = (desc1, desc2) => {
@@ -77,7 +141,7 @@ router.get("/posts/deduplicate", roleAuth(["admin", "superadmin"]), async (req, 
       const [lon2, lat2] = coords2;
       if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
 
-      const R = 6371e3;
+      const R = 6371e3; // Earth's radius in meters
       const φ1 = lat1 * Math.PI/180;
       const φ2 = lat2 * Math.PI/180;
       const Δφ = (lat2-lat1) * Math.PI/180;
@@ -91,16 +155,16 @@ router.get("/posts/deduplicate", roleAuth(["admin", "superadmin"]), async (req, 
 
     const recommendDepartment = (description) => {
       const keywords = {
-        'roads': ['road', 'pothole', 'street', 'footpath', 'traffic', 'bridge', 'construction'],
-        'water': ['water', 'pipe', 'leak', 'drainage', 'sewage', 'flood'],
-        'waste': ['garbage', 'waste', 'trash', 'dump', 'cleaning', 'sanitation'],
-        'electricity': ['light', 'electricity', 'power', 'streetlight', 'electric', 'wire'],
-        'parks': ['park', 'garden', 'tree', 'playground', 'grass', 'recreation']
+        'roads': ['road', 'pothole', 'street', 'footpath', 'traffic', 'bridge', 'construction', 'highway', 'pavement'],
+        'water': ['water', 'pipe', 'leak', 'drainage', 'sewage', 'flood', 'tap', 'supply', 'overflow'],
+        'waste': ['garbage', 'waste', 'trash', 'dump', 'cleaning', 'sanitation', 'litter', 'rubbish'],
+        'electricity': ['light', 'electricity', 'power', 'streetlight', 'electric', 'wire', 'outage', 'transformer'],
+        'parks': ['park', 'garden', 'tree', 'playground', 'grass', 'recreation', 'bench', 'greenery']
       };
 
       const descLower = (description || "").toLowerCase();
       let maxMatches = 0;
-      let recommendedDept = 'roads';
+      let recommendedDept = 'roads'; // default
 
       for (const [dept, words] of Object.entries(keywords)) {
         const matches = words.filter(word => descLower.includes(word)).length;
@@ -112,7 +176,7 @@ router.get("/posts/deduplicate", roleAuth(["admin", "superadmin"]), async (req, 
       return recommendedDept;
     };
 
-    // --- clustering ---
+    // --- clustering algorithm ---
     const clusters = [];
     const processedPosts = new Set();
 
@@ -122,93 +186,209 @@ router.get("/posts/deduplicate", roleAuth(["admin", "superadmin"]), async (req, 
       const cluster = {
         mainPost: post,
         issues: [post],
-        recommendedDepartment: recommendDepartment(post.description || '')
+        recommendedDepartment: recommendDepartment(post.description || ''),
+        similarityScores: [] // for debugging
       };
 
+      // Find similar posts
       for (const otherPost of posts) {
-        if (post._id === otherPost._id || processedPosts.has(otherPost._id.toString())) continue;
+        if (post._id.equals(otherPost._id) || processedPosts.has(otherPost._id.toString())) continue;
 
-        const descSim = getDescriptionSimilarity(post.description, otherPost.description);
+        const descSimilarity = getDescriptionSimilarity(post.description, otherPost.description);
         const distance = getDistance(post.location?.coordinates, otherPost.location?.coordinates);
-        const timeDiff = Math.abs(new Date(post.createdAt) - new Date(otherPost.createdAt)) / (1000*60*60);
+        const timeDiff = Math.abs(new Date(post.createdAt) - new Date(otherPost.createdAt)) / (1000*60*60); // hours
 
-        if (descSim > 0.5 && distance < 1000 && timeDiff < 24) {
+        // Clustering criteria: similar description + close location + recent time
+        const isSimilar = descSimilarity > 0.4 && distance < 1000 && timeDiff < 48; // 48 hours window
+
+        if (isSimilar) {
           cluster.issues.push(otherPost);
+          cluster.similarityScores.push({
+            postId: otherPost._id,
+            descSimilarity: descSimilarity.toFixed(2),
+            distance: Math.round(distance),
+            timeDiff: Math.round(timeDiff)
+          });
           processedPosts.add(otherPost._id.toString());
         }
       }
 
+      // Only include clusters with multiple issues
       if (cluster.issues.length > 1) {
         processedPosts.add(post._id.toString());
         clusters.push(cluster);
+        console.log(`📊 Created cluster with ${cluster.issues.length} issues for department: ${cluster.recommendedDepartment}`);
       }
     }
 
-    // --- if no real cluster, add dummy ---
-    if (clusters.length === 0) {
-      clusters.push({
-        mainPost: {
-          _id: "dummy_main",
-          description: "Road damaged near main street",
-          location: { type: "Point", coordinates: [80.123, 13.456] },
-          createdAt: new Date(),
-        },
-        recommendedDepartment: "roads",
-        issues: [
-          {
-            _id: "dummy_issue1",
-            description: "Huge pothole near bus stop",
-            location: { type: "Point", coordinates: [80.123, 13.456] },
-            address: "Main Street",
-            createdAt: new Date(),
-            user: { username: "TestUser" },
-            status: "In Progress"
-          }
-        ]
-      });
-    } else {
-      const issueIds = clusters.flatMap(c => c.issues.map(i => i._id));
-      await Post.updateMany(
-        { _id: { $in: issueIds } },
-        { $set: { status: "In Progress", updatedAt: new Date() } }
-      );
-      clusters.forEach(c => c.issues.forEach(i => i.status = "In Progress"));
-    }
+    // ❌ REMOVED: No automatic status updates here
+    // Posts remain "Pending" until explicitly acknowledged
+
+    console.log(`📊 Found ${clusters.length} clusters from ${posts.length} pending posts`);
+
+    // Format response for frontend
+    const formattedClusters = clusters.map(cluster => ({
+      mainPost: {
+        id: cluster.mainPost._id,
+        description: cluster.mainPost.description,
+        location: cluster.mainPost.location,
+        createdAt: cluster.mainPost.createdAt
+      },
+      recommendedDepartment: cluster.recommendedDepartment,
+      issues: cluster.issues.map(issue => ({
+        id: issue._id,
+        description: issue.description,
+        location: issue.location,
+        address: issue.address,
+        createdAt: issue.createdAt,
+        userName: issue.user?.username || "Anonymous",
+        status: issue.status || "Pending", // Keep original status
+        latitude: issue.location?.coordinates?.[1] || null,
+        longitude: issue.location?.coordinates?.[0] || null,
+        media: issue.media || [],
+        voiceMsg: issue.voiceMsg || null
+      }))
+    }));
 
     res.json({
       success: true,
-      msg: "Clusters (with In Progress status for testing)",
-      clusters: clusters.map(cluster => ({
-        mainPost: {
-          id: cluster.mainPost._id,
-          description: cluster.mainPost.description,
-          location: cluster.mainPost.location,
-          createdAt: cluster.mainPost.createdAt
-        },
-        recommendedDepartment: cluster.recommendedDepartment,
-        issues: cluster.issues.map(issue => ({
-          id: issue._id,
-          description: issue.description,
-          location: issue.location,
-          address: issue.address,
-          createdAt: issue.createdAt,
-          userName: issue.user?.username || "Anonymous",
-          status: issue.status || "InProgress",
-          latitude: issue.location?.coordinates?.[1] || null,
-          longitude: issue.location?.coordinates?.[0] || null,
-          media: issue.media || [],
-          voiceMsg: issue.voiceMsg || null
-        }))
-      })),
-      totalIssues: clusters.reduce((acc, c) => acc + c.issues.length, 0)
+      message: `Found ${clusters.length} issue clusters ready for review`,
+      clusters: formattedClusters,
+      totalIssues: clusters.reduce((acc, c) => acc + c.issues.length, 0),
+      pendingPosts: posts.length
     });
 
   } catch (err) {
-    console.error("❌ Error duplicatess posts:", err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Error clustering posts:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to cluster posts",
+      message: err.message 
+    });
   }
 });
 
+// 📌 Acknowledge cluster (Admin / Superadmin)
+router.post("/posts/acknowledge-cluster", roleAuth(["admin", "superadmin"]), async (req, res) => {
+  try {
+    const { clusterId, issues, adminComment, department, status } = req.body;
+
+    // Validate enum status
+    const allowedStatuses = ["Pending", "In Progress", "Resolved"];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Allowed: ${allowedStatuses.join(", ")}` });
+    }
+
+    const clusterAssignment = new ClusterAssignment({
+      clusterId,
+      issues,
+      department,
+      adminComment,
+      status,
+      acknowledgedBy: req.user.id,
+      departmentUpdates: [{
+        status: "In Progress",
+        comment: "Issue forwarded to department"
+      }]
+    });
+
+    await clusterAssignment.save();
+
+    // Update all related posts
+    await Post.updateMany(
+      { _id: { $in: issues } },
+      {
+        $set: {
+          status: status,
+          clusterAssignment: clusterAssignment._id,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    // 🔔 Find which users created these issues
+    const posts = await Post.find({ _id: { $in: issues } }).select("createdBy");
+    const userIds = posts.map(p => p.createdBy);
+
+    // 🔔 Get tokens of those users
+    const tokensDocs = await DeviceToken.find({ userId: { $in: userIds } });
+    const tokens = tokensDocs.map(t => t.token);
+
+    if (tokens.length > 0) {
+      await sendPushNotification(
+        tokens,
+        "📢 Cluster Acknowledged",
+        `Your issue(s) in Cluster #${clusterId} have been forwarded to ${department}`
+      );
+    }
+
+    res.json({
+      msg: "Cluster acknowledged, users notified, and forwarded to department",
+      department,
+      updatedIssues: issues.length,
+      clusterAssignmentId: clusterAssignment._id
+    });
+  } catch (err) {
+    console.error("❌ Error acknowledging cluster:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+/**
+ * 📊 Enhanced Stats Route - More accurate counting
+ */
+router.get("/posts/stats", async (req, res) => {
+  try {
+    console.log("📊 Calculating post statistics...");
+
+    // Get accurate counts
+    const [pending, inProgress, resolved, totalReports] = await Promise.all([
+      Post.countDocuments({ status: "Pending" }),
+      Post.countDocuments({ status: "In Progress" }),
+      Post.countDocuments({ status: "Resolved" }),
+      Post.countDocuments({}) // Total count
+    ]);
+
+    // Additional insights
+    const [clusteredCount, recentCount, overdueCount] = await Promise.all([
+      Post.countDocuments({ clusterAssignment: { $exists: true } }),
+      Post.countDocuments({ 
+        createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } 
+      }),
+      Post.countDocuments({
+        status: { $ne: "Resolved" },
+        createdAt: { $lt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) }
+      })
+    ]);
+
+    const stats = {
+      pending,
+      inProgress,
+      resolved,
+      totalReports,
+      // Additional metrics
+      clustered: clusteredCount,
+      recent: recentCount, // Last 7 days
+      overdue: overdueCount, // Older than 3 days, not resolved
+      resolutionRate: totalReports > 0 ? ((resolved / totalReports) * 100).toFixed(1) : 0
+    };
+
+    console.log("📊 Stats calculated:", stats);
+
+    res.json({
+      success: true,
+      ...stats,
+      lastUpdated: new Date()
+    });
+
+  } catch (err) {
+    console.error("❌ Error calculating stats:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to calculate statistics",
+      message: err.message
+    });
+  }
+});
 // Add these routes to your existing admin router (after the existing routes)
 
 /**
@@ -570,7 +750,7 @@ function generateRecentActivity(assignments, posts) {
     
   recentAssignments.forEach(assignment => {
     activities.push({
-      type: 'assigned',
+      type: 'In Progress',
       message: `New assignment #${assignment._id.toString().slice(-8)} received`,
       timestamp: assignment.createdAt
     });
@@ -970,6 +1150,49 @@ router.get("/clusters/progress", roleAuth(["admin", "superadmin"]), async (req, 
   }
 });
 
+// API: Get all posts with NLP priority and sort
+router.get("/posts/nlp", async (req, res) => {
+  try {
+    const posts = await Post.find().lean();
+
+    // Add NLP priority
+    posts.forEach(post => {
+      post.nlpPriority = getPriorityScore(post.description);
+    });
+
+    // Sort by priority (1=High) then by creation time
+    posts.sort((a, b) =>
+      a.nlpPriority - b.nlpPriority ||
+      new Date(a.createdAt) - new Date(b.createdAt)
+    );
+
+    res.json(posts);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// API: Get only high-priority posts
+router.get("/posts/high-priority", async (req, res) => {
+  try {
+    const posts = await Post.find().lean();
+
+    // Filter only high-priority posts
+    const highPriorityPosts = posts.filter(
+      post => getPriorityScore(post.description) === 1
+    );
+
+    // Sort by createdAt (latest first)
+    highPriorityPosts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json(highPriorityPosts);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 
 /**
  * 👍 Toggle like on a post
@@ -1115,7 +1338,6 @@ router.get("/cluster-assignments/:id", roleAuth(["department", "admin", "superad
     res.status(500).json({ error: err.message });
   }
 });
-
 // 🔄 Update cluster assignment status (Department only)
 router.patch("/cluster-assignments/:id", roleAuth(["department"]), async (req, res) => {
   try {
@@ -1130,18 +1352,42 @@ router.patch("/cluster-assignments/:id", roleAuth(["department"]), async (req, r
     // Update assignment & related posts
     if (status === "Resolved") {
       assignment.status = "Resolved";
-      await Post.updateMany({ _id: { $in: assignment.issues } }, { $set: { status: "Resolved" } });
+      await Post.updateMany(
+        { _id: { $in: assignment.issues } },
+        { $set: { status: "Resolved" } }
+      );
     } else {
       assignment.status = status;
-      await Post.updateMany({ _id: { $in: assignment.issues } }, { $set: { status } });
+      await Post.updateMany(
+        { _id: { $in: assignment.issues } },
+        { $set: { status } }
+      );
     }
 
     await assignment.save();
+
+    // 🔔 Notify all users who reported issues in this cluster
+    const posts = await Post.find({ _id: { $in: assignment.issues } }).select("createdBy");
+    const userIds = posts.map(p => p.createdBy);
+
+    const tokensDocs = await DeviceToken.find({ userId: { $in: userIds } });
+    const tokens = tokensDocs.map(t => t.token);
+
+    if (tokens.length > 0) {
+      await sendPushNotification(
+        tokens,
+        `Cluster #${assignment.clusterId} Update`,
+        `The status of your reported issues is now: ${status}`
+      );
+    }
+
     res.json(assignment);
   } catch (err) {
     console.error("❌ Error updating cluster assignment:", err);
     res.status(500).json({ error: err.message });
-  }
+  } 
 });
+
+
 
 module.exports = router;

@@ -159,17 +159,33 @@ router.get("/paginated", auth, async (req, res) => {
   }
 });
 
+// ✅ Get user's posts with pagination
 router.get("/my/posts", auth, async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 5;
+    const skip = (page - 1) * limit;
+
+    // Fetch paginated posts for the logged-in user
     const posts = await Post.find({ user: req.user.id })
       .populate("user", "username email")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
     if (!posts || posts.length === 0) {
       return res.status(404).json({ msg: "You haven’t created any posts yet" });
     }
 
-    res.json({ msg: "Your posts", posts });
+    const totalPosts = await Post.countDocuments({ user: req.user.id });
+
+    res.json({
+      msg: "Your posts fetched successfully ✅",
+      page,
+      totalPages: Math.ceil(totalPosts / limit),
+      totalPosts,
+      posts
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

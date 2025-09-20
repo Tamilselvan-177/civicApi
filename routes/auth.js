@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const User = require("../models/User");
+const DeviceToken = require("../models/DeviceToken"); // <-- Add this
 const auth = require("../middleware/auth");
 require("dotenv").config();
 
@@ -20,18 +21,14 @@ router.post("/register", async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Check if user exists
     const existingUser = await User.findOne({ email });
     if (existingUser) return res.status(400).json({ msg: "User already exists" });
 
-    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Generate verification token
     const verificationToken = crypto.randomBytes(32).toString("hex");
 
-    // Save user
     const newUser = new User({
       username,
       email,
@@ -40,7 +37,6 @@ router.post("/register", async (req, res) => {
     });
     await newUser.save();
 
-    // Send verification email
     const mailOptions = {
       from: process.env.EMAIL,
       to: email,
@@ -82,7 +78,6 @@ router.post("/login", async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ msg: "User does not exist" });
 
-    // Check if email verified
     if (!user.isVerified) return res.status(401).json({ msg: "Please verify your email first" });
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -105,6 +100,27 @@ router.get("/me", auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
     res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 🔔 Register Expo push token (authenticated users only)
+router.post("/register-token", async (req, res) => {
+  try {
+    const userId = req.user.id; // get from auth middleware
+    const { token } = req.body;
+
+    if (!token) return res.status(400).json({ msg: "Push token is required" });
+
+    // Upsert token
+    await DeviceToken.findOneAndUpdate(
+      { userId, token },
+      { userId, token },
+      { upsert: true }
+    );
+
+    res.json({ msg: "Push token registered successfully" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
