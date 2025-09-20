@@ -2,32 +2,44 @@ const mongoose = require("mongoose");
 const Comment = require("./Comment");
 const Like = require("./Like");
 
-const postSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-  description: { type: String },
-  voiceMsg: { type: String }, // path to uploaded voice file
-  media: [{ type: String }],  // image/video file paths
-  location: {
-    type: {
-      type: String,
-      enum: ["Point"],
-      default: "Point"
+const postSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    description: { type: String },
+    voiceMsg: { type: String }, // path to uploaded voice file
+    media: [{ type: String }],  // image/video file paths
+    
+    location: {
+      type: {
+        type: String,
+        enum: ["Point"],
+        default: "Point"
+      },
+      coordinates: {
+        type: [Number], // [longitude, latitude]
+        required: true
+      }
     },
-    coordinates: {
-      type: [Number], // [longitude, latitude]
-      required: true
+
+    // ✅ New field for human-readable address
+    address: { 
+      type: String,
+      default: "Unknown address"
+    },
+
+    status: {
+      type: String,
+      enum: ["Resolved", "In Progress", "Pending"],
+      default: "Pending"
+    },
+
+    clusterAssignment: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ClusterAssignment"
     }
   },
-  status: {
-    type: String,
-    enum: ["Resolved", "In Progress", "Pending"],
-    default: "Pending"
-  },
-  clusterAssignment: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "ClusterAssignment"
-  }
-}, { timestamps: true });
+  { timestamps: true }
+);
 
 // Cascade delete comments and likes when a post is deleted
 postSchema.pre("findOneAndDelete", async function(next) {

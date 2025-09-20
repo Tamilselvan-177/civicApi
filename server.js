@@ -10,7 +10,7 @@ const profileRoutes = require("./routes/profile");
 const authRoutes = require("./routes/auth");
 const adminAuthRoutes = require("./routes/adminAuth"); // Add this line
 const ivrRoutes = require('./routes/ivr');
-
+const feedbackRoutes = require("./routes/feedback");
 const app = express();
 
 app.use(express.json());
@@ -42,7 +42,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/api/admin", adminAuthRoutes);
 app.use('/api/ivr', ivrRoutes);
-
+app.use("/api/feeedback", feedbackRoutes);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 const PORT = 5000;

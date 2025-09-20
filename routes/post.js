@@ -7,34 +7,53 @@ const Comment = require("../models/Comment");
 
 const router = express.Router();
 // ✅ Create a post API
+
+const axios = require("axios");
+
+// Free OpenStreetMap Reverse Geocoding
+async function getAddressFromCoords(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`;
+    const res = await axios.get(url, {
+      headers: { "User-Agent": "civic-issue-app/1.0" } // Nominatim requires UA
+    });
+
+    if (res.data && res.data.display_name) {
+      return res.data.display_name; // full human-readable address
+    }
+    return "Unknown address";
+  } catch (err) {
+    console.error("❌ Nominatim error:", err.message);
+    return "Unknown address";
+  }
+}
 router.post(
   "/",
   auth,
   upload.fields([
-    { name: "media", maxCount: 5 },   // images/videos
-    { name: "voiceMsg", maxCount: 1 } // voice message
+    { name: "media", maxCount: 5 },
+    { name: "voiceMsg", maxCount: 1 }
   ]),
   async (req, res) => {
     try {
-      // ✅ Extract text fields (from FormData)
       const description = req.body.description || "";
       const latitude = parseFloat(req.body.latitude);
       const longitude = parseFloat(req.body.longitude);
 
-      // ✅ Extract files safely
-      const mediaFiles = req.files && req.files.media ? req.files.media.map(f => f.path) : [];
-      const voiceFile = req.files && req.files.voiceMsg ? req.files.voiceMsg[0].path : null;
+      const mediaFiles = req.files?.media ? req.files.media.map(f => f.path) : [];
+      const voiceFile = req.files?.voiceMsg ? req.files.voiceMsg[0].path : null;
 
-      // ✅ Validation rules
       if (!description && !voiceFile) {
         return res.status(400).json({ msg: "Either description or voice message is required" });
       }
-
       if (mediaFiles.length === 0) {
         return res.status(400).json({ msg: "At least one media file (image/video) is required" });
       }
 
-      // ✅ Create post
+      // ✅ Convert lat/lng → address (Nominatim)
+      const address = await getAddressFromCoords(latitude, longitude);
+
+      // ✅ Create post with address
       const newPost = new Post({
         user: req.user.id,
         description,
@@ -43,7 +62,8 @@ router.post(
         location: {
           type: "Point",
           coordinates: [longitude, latitude]
-        }
+        },
+        address
       });
 
       await newPost.save();

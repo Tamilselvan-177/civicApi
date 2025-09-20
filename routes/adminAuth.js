@@ -752,6 +752,111 @@ router.get("/cluster-assignments", roleAuth(["department"]), async (req, res) =>
 
 
 
+// Add this route to your existing router file or create a new posts.js route file
+
+/**
+ * 📱 Get community feed - posts with 5+ likes
+ */
+router.get("/community-feed", async (req, res) => {
+  try {
+    const communityPosts = await Post.aggregate([
+      // Join likes
+      {
+        $lookup: {
+          from: "likes",
+          localField: "_id",
+          foreignField: "post",
+          as: "likes",
+        },
+      },
+      // Join comments
+      {
+        $lookup: {
+          from: "comments",
+          localField: "_id",
+          foreignField: "post",
+          as: "comments",
+        },
+      },
+      // Join post author info
+      {
+        $lookup: {
+          from: "users",
+          localField: "user",
+          foreignField: "_id",
+          as: "userInfo",
+        },
+      },
+      // Add counts
+      {
+        $addFields: {
+          likeCount: { $size: "$likes" },
+          commentCount: { $size: "$comments" },
+        },
+      },
+      // Filter posts with >= 3 likes
+      {
+        $match: {
+          likeCount: { $gte: 2 },
+        },
+      },
+      // Sort by likeCount desc, then createdAt desc
+      {
+        $sort: { likeCount: -1, createdAt: -1 },
+      },
+      // Limit to 50
+      { $limit: 50 },
+      // Project final structure
+      {
+        $project: {
+          _id: 1,
+          description: 1,
+          voiceMsg: 1,
+          media: 1,
+          location: 1,
+          status: 1,
+          createdAt: 1,
+          likeCount: 1,
+          commentCount: 1,
+          user: {
+            _id: { $arrayElemAt: ["$userInfo._id", 0] },
+            username: { $arrayElemAt: ["$userInfo.username", 0] },
+            email: { $arrayElemAt: ["$userInfo.email", 0] },
+          },
+          // Only comment text and createdAt
+          recentComments: {
+            $slice: [
+              {
+                $map: {
+                  input: "$comments",
+                  as: "comment",
+                  in: {
+                    text: "$$comment.text",
+                    createdAt: "$$comment.createdAt",
+                  },
+                },
+              },
+              2,
+            ],
+          },
+        },
+      },
+    ]);
+
+    res.json({
+      success: true,
+      count: communityPosts.length,
+      posts: communityPosts,
+    });
+  } catch (err) {
+    console.error("Community feed error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch community feed",
+      message: err.message,
+    });
+  }
+});
 
 // 📌 Acknowledge cluster (Admin / Superadmin)
 router.post("/posts/acknowledge-cluster", roleAuth(["admin", "superadmin"]), async (req, res) => {
@@ -829,24 +934,32 @@ router.get("/clusters/progress", roleAuth(["admin", "superadmin"]), async (req, 
   try {
     const clusters = await ClusterAssignment.find().populate({
       path: "issues",
-      model: Post,
-      select: "department adminComment status departmentUpdates metrics",
+      model: "Post",
+      select: "title department adminComment status departmentUpdates metrics", // ✅ populate title
     });
 
     const formatted = clusters.map((c) => {
-      const statusStats = { Pending: 0, "Dept Assigned": 0, "In Progress": 0, Completed: 0 };
+      const statusStats = { Pending: 0, "Dept Assigned": 0, "In Progress": 0, Resolved: 0 };
 
       c.issues.forEach((issue) => {
-        if (statusStats[issue.status] !== undefined) {
-          statusStats[issue.status]++;
+        // normalize "Completed" or "Resolved"
+        const normalizedStatus = issue.status === "Completed" ? "Resolved" : issue.status;
+        if (statusStats[normalizedStatus] !== undefined) {
+          statusStats[normalizedStatus]++;
         }
       });
 
       return {
         clusterId: c._id,
-        clusterName: c.clusterId, // ✅ schema uses clusterId string
-        issues: c.issues,
-        stats: statusStats, // ✅ new field for frontend
+        clusterName: c.clusterId, // schema uses clusterId string
+        issues: c.issues.map((issue) => ({
+          _id: issue._id,
+          title: issue.title || "Unnamed Issue", // ✅ send title for frontend
+          department: issue.department,
+          adminComment: issue.adminComment,
+          status: issue.status,
+        })),
+        stats: statusStats, // stats for frontend
       };
     });
 
@@ -857,6 +970,62 @@ router.get("/clusters/progress", roleAuth(["admin", "superadmin"]), async (req, 
   }
 });
 
+
+/**
+ * 👍 Toggle like on a post
+ */
+router.post("/:postId/like", roleAuth(["admin", "superadmin", "department"]), async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const userId = req.user.id;
+
+    // Check if post exists
+    const post = await Post.findById(postId);
+    if (!post) {
+      return res.status(404).json({ success: false, msg: "Post not found" });
+    }
+
+    // Check if user already liked this post
+    const existingLike = await Like.findOne({ user: userId, post: postId });
+
+    if (existingLike) {
+      // Unlike - remove the like
+      await Like.findOneAndDelete({ user: userId, post: postId });
+      
+      // Get updated like count
+      const likeCount = await Like.countDocuments({ post: postId });
+      
+      res.json({
+        success: true,
+        liked: false,
+        likeCount,
+        message: "Post unliked"
+      });
+    } else {
+      // Like - add new like
+      const newLike = new Like({ user: userId, post: postId });
+      await newLike.save();
+      
+      // Get updated like count
+      const likeCount = await Like.countDocuments({ post: postId });
+      
+      res.json({
+        success: true,
+        liked: true,
+        likeCount,
+        message: "Post liked"
+      });
+    }
+
+  } catch (err) {
+    console.error("Like toggle error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to toggle like",
+      message: err.message 
+    });
+  }
+});
 
 
 router.patch("/cluster-assignments/:id/priority", roleAuth(["department", "admin", "superadmin"]), async (req, res) => {
